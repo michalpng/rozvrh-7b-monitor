@@ -1,0 +1,56 @@
+name: Monitoring rozvrhu 7B
+
+on:
+  schedule:
+    # Každých 10 minut. GitHub negarantuje přesnou minutu spuštění (může se
+    # zpozdit o pár minut při vytížení), pro sledování rozvrhu je to bez problému.
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {} # umožní ruční spuštění tlačítkem v záložce Actions
+
+permissions:
+  contents: write # potřeba pro commit aktualizovaného data/state.json
+
+concurrency:
+  group: rozvrh-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repozitáře
+        uses: actions/checkout@v4
+
+      - name: Nastavení Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalace závislostí
+        run: npm install
+
+      - name: Cache Playwright browserů (zrychlení dalších běhů)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Instalace Chromia pro Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Spuštění kontroly rozvrhu
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: node scripts/check.js
+
+      - name: Commit aktualizovaného stavu (jen pokud se něco změnilo)
+        run: |
+          git config user.name "rozvrh-monitor-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- data/state.json; then
+            git add data/state.json
+            git commit -m "chore: aktualizace stavu rozvrhu"
+            git push
+          else
+            echo "Žádná změna stavu k commitnutí."
+          fi
