@@ -7,7 +7,7 @@ const { chromium } = require('playwright');
 
 // URL sledované třídy - Bakaláři "Next" rozvrh je JS aplikace (SPA),
 // proto se musí obsah stahovat přes headless prohlížeč (Playwright), ne přes obyčejné HTTP GET.
-const URL = 'https://ss-stavebnikolin.bakalari.cz/Timetable/Public/Next/Class/7B';
+const URL = 'https://ss-stavebnikolin.bakalari.cz/Timetable/Public/Actual/Class/7B';
 
 // CSS selector oblasti, kterou sledujeme. Výchozí je "body" (celá stránka).
 // DOPORUČENÍ: po prvním nasazení otevřete stránku v prohlížeči, přes DevTools (F12)
