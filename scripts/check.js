@@ -19,6 +19,9 @@ const SELECTOR = process.env.TIMETABLE_SELECTOR || 'body';
 
 const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+// Discord User ID (číslo), aby zpráva uživatele reálně "pingla" - viz README,
+// jak ID zjistit. Pokud není nastavené, zprávy se posílají bez tagování.
+const DISCORD_USER_ID = process.env.DISCORD_USER_ID || '';
 const MAX_FAILURES = 3;
 
 function loadState() {
@@ -64,7 +67,11 @@ async function sendDiscord(payload) {
     console.error('Chybí DISCORD_WEBHOOK_URL (nastavte GitHub Secret nebo .env pro lokální test).');
     return;
   }
-  await axios.post(WEBHOOK_URL, payload, { timeout: 10000 });
+  // "content" s <@ID> je jediný způsob, jak webhook zprávu opravdu "pingne" -
+  // tagování uvnitř embedu (title/description) je jen text bez notifikace.
+  const mention = DISCORD_USER_ID ? `<@${DISCORD_USER_ID}>` : '';
+  const finalPayload = mention ? { content: mention, ...payload } : payload;
+  await axios.post(WEBHOOK_URL, finalPayload, { timeout: 10000 });
 }
 
 /** Retry s prodlevou - ošetří dočasné výpadky serveru Bakalářů. */
