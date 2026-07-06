@@ -1,176 +1,185 @@
-require('dotenv').config();
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const axios = require('axios');
-const { chromium } = require('playwright');
+require("dotenv").config();
+const { chromium } = require("playwright");
+const fs = require("fs");
+const path = require("path");
+const axios = require("axios");
 
-// URL sledované třídy - Bakaláři "Next" rozvrh je JS aplikace (SPA),
-// proto se musí obsah stahovat přes headless prohlížeč (Playwright), ne přes obyčejné HTTP GET.
-const URL = 'https://ss-stavebnikolin.bakalari.cz/Timetable/Public/Actual/Class/7B';
+const TIMETABLE_URL =
+  process.env.TIMETABLE_URL ||
+  "https://ss-stavebnikolin.bakalari.cz/Timetable/Public/Next/Class/7B";
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+const DISCORD_USER_ID = process.env.DISCORD_USER_ID || null;
+const STATE_PATH = path.join(__dirname, "..", "data", "state.json");
 
-// CSS selector oblasti, kterou sledujeme. Výchozí je "body" (celá stránka).
-// DOPORUČENÍ: po prvním nasazení otevřete stránku v prohlížeči, přes DevTools (F12)
-// najděte element obsahující samotnou tabulku rozvrhu (např. by mohl mít třídu
-// jako ".bk-timetable-main" nebo podobně) a nastavte přesnější selector přes
-// proměnnou prostředí TIMETABLE_SELECTOR - omezí se tak riziko "falešných" upozornění
-// na nepodstatné změny mimo tabulku.
-const SELECTOR = process.env.TIMETABLE_SELECTOR || 'body';
-
-const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
-const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-// Discord User ID (číslo), aby zpráva uživatele reálně "pingla" - viz README,
-// jak ID zjistit. Pokud není nastavené, zprávy se posílají bez tagování.
-const DISCORD_USER_ID = process.env.DISCORD_USER_ID || '';
-const MAX_FAILURES = 3;
+// ---------- state ----------
 
 function loadState() {
-  if (!fs.existsSync(STATE_FILE)) return {};
+  if (!fs.existsSync(STATE_PATH)) return { lessons: {} };
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
+    return JSON.parse(fs.readFileSync(STATE_PATH, "utf-8"));
   } catch {
-    return {};
+    return { lessons: {} };
   }
 }
 
 function saveState(state) {
-  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
+  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
 }
 
-function hash(text) {
-  return crypto.createHash('sha256').update(text).digest('hex');
+// ---------- extrakce z Bakalářů ----------
+
+async function extractLessons(page) {
+  return page.$$eval("[data-detail]", (nodes) =>
+    nodes
+      .map((el) => {
+        let detail;
+        try {
+          detail = JSON.parse(el.getAttribute("data-detail"));
+        } catch {
+          return null;
+        }
+        const middle = el.querySelector(".middle");
+        const subjectAbbrev =
+          middle?.querySelector("div")?.textContent?.trim() || "";
+        const teacherAbbrev =
+          middle?.querySelector(".teacher-name")?.textContent?.trim() || "";
+        const room =
+          el.querySelector(".top .right .first")?.textContent?.trim() ||
+          detail.room ||
+          "";
+        const group =
+          el.querySelector(".top .left .groups-names")?.textContent?.trim() ||
+          detail.group ||
+          "";
+
+        return {
+          identCode: (detail.IdentCode || "").trim(),
+          day: detail.day,
+          time: detail.time,
+          subjectAbbrev,
+          teacherAbbrev,
+          room,
+          group,
+          infoChangeCode: detail.infoChangeCode,
+        };
+      })
+      .filter((l) => l && l.identCode)
+  );
 }
 
-/** Stáhne vykreslený obsah stránky pomocí headless Chromia. */
-async function fetchTimetableText() {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+// ---------- diff ----------
+
+function diffLessons(oldLessons, newLessons) {
+  const changes = [];
+  for (const [identCode, next] of Object.entries(newLessons)) {
+    const prev = oldLessons[identCode];
+    if (!prev) continue; // nová hodina v rozvrhu (jiný týden) - nepočítá se jako substituce
+
+    const fields = ["subjectAbbrev", "teacherAbbrev", "room"];
+    const changed = fields.filter((f) => prev[f] !== next[f]);
+    if (changed.length > 0) {
+      changes.push({ day: next.day, time: next.time, prev, next, changed });
+    }
+  }
+  return changes;
+}
+
+// ---------- Discord ----------
+
+function buildDiffLine(label, oldVal, newVal) {
+  return `${label}: ~~${oldVal || "—"}~~ → **${newVal || "—"}**`;
+}
+
+async function sendDiscordNotification(changes) {
+  if (!DISCORD_WEBHOOK_URL) {
+    console.log("DISCORD_WEBHOOK_URL není nastaveno, notifikaci neposílám.");
+    return;
+  }
+
+  const ping = DISCORD_USER_ID ? `<@${DISCORD_USER_ID}> ` : "";
+
+  const fields = changes.map((c) => {
+    const lines = [];
+    if (c.changed.includes("subjectAbbrev")) {
+      lines.push(buildDiffLine("Předmět", c.prev.subjectAbbrev, c.next.subjectAbbrev));
+    }
+    if (c.changed.includes("teacherAbbrev")) {
+      lines.push(buildDiffLine("Učitel", c.prev.teacherAbbrev, c.next.teacherAbbrev));
+    }
+    if (c.changed.includes("room")) {
+      lines.push(buildDiffLine("Učebna", c.prev.room, c.next.room));
+    }
+    return {
+      name: `${c.day} · ${c.time}`,
+      value: lines.join("\n"),
+    };
+  });
+
+  const payload = {
+    content: `${ping}🔔 Změna v rozvrhu`,
+    allowed_mentions: { parse: ["users"] },
+    embeds: [
+      {
+        color: 0xe67e22,
+        fields,
+        footer: { text: "Rozvrh 7B" },
+      },
+    ],
+    components: [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 5,
+            label: "Odkaz na rozvrh",
+            url: TIMETABLE_URL,
+          },
+        ],
+      },
+    ],
+  };
+
+  await axios.post(DISCORD_WEBHOOK_URL, payload);
+}
+
+// ---------- main ----------
+
+async function main() {
+  const state = loadState();
+  const oldLessons = state.lessons || {};
+
+  const browser = await chromium.launch();
   try {
-    const page = await browser.newPage({ userAgent: 'Mozilla/5.0 (compatible; RozvrhMonitor/1.0)' });
-    await page.goto(URL, { waitUntil: 'networkidle', timeout: 30000 });
-    // Krátké dodatečné čekání - Bakaláři gridy se občas dorenderují až po networkidle
-    await page.waitForTimeout(1500);
+    const page = await browser.newPage();
+    await page.goto(TIMETABLE_URL, { waitUntil: "networkidle" });
 
-    const text = await page.evaluate((sel) => {
-      const el = document.querySelector(sel);
-      return (el || document.body).innerText;
-    }, SELECTOR);
+    const lessonsArr = await extractLessons(page);
+    const newLessons = {};
+    for (const l of lessonsArr) newLessons[l.identCode] = l;
 
-    return text.replace(/\s+/g, ' ').trim();
+    const changes = diffLessons(oldLessons, newLessons);
+
+    if (changes.length > 0) {
+      console.log(`Zjištěno ${changes.length} změn(y), posílám notifikaci.`);
+      await sendDiscordNotification(changes);
+      state.lastChangedAt = new Date().toISOString();
+    } else {
+      console.log("Žádná změna oproti poslednímu stavu.");
+    }
+
+    state.lessons = newLessons;
+    delete state.lastError;
+    saveState(state);
+  } catch (err) {
+    console.error("Chyba při kontrole rozvrhu:", err);
+    state.lastError = { message: err.message, at: new Date().toISOString() };
+    saveState(state);
+    process.exitCode = 1;
   } finally {
     await browser.close();
   }
 }
 
-async function sendDiscord(payload) {
-  if (!WEBHOOK_URL) {
-    console.error('Chybí DISCORD_WEBHOOK_URL (nastavte GitHub Secret nebo .env pro lokální test).');
-    return;
-  }
-  // "content" s <@ID> je jediný způsob, jak webhook zprávu opravdu "pingne" -
-  // tagování uvnitř embedu (title/description) je jen text bez notifikace.
-  const mention = DISCORD_USER_ID ? `<@${DISCORD_USER_ID}>` : '';
-  const finalPayload = mention ? { content: mention, ...payload } : payload;
-  await axios.post(WEBHOOK_URL, finalPayload, { timeout: 10000 });
-}
-
-/** Retry s prodlevou - ošetří dočasné výpadky serveru Bakalářů. */
-async function withRetry(fn, retries = 2, delayMs = 2000) {
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      if (attempt < retries) await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
-    }
-  }
-  throw lastErr;
-}
-
-async function main() {
-  const state = loadState();
-  const now = new Date().toISOString();
-  let stateChanged = false;
-
-  try {
-    const text = await withRetry(fetchTimetableText);
-    const currentHash = hash(text);
-
-    // Pokud jsme předtím hlásili výpadek, dej vědět, že je zase vše v pořádku
-    if ((state.failCount || 0) >= MAX_FAILURES) {
-      await sendDiscord({
-        embeds: [{ title: '✅ Rozvrh 7B je opět dostupný', color: 0x5865f2 }]
-      });
-    }
-
-    if (!state.hash) {
-      console.log('První běh – ukládám počáteční stav rozvrhu (bez notifikace).');
-      state.hash = currentHash;
-      state.lastChangedAt = now;
-      stateChanged = true;
-    } else if (state.hash !== currentHash) {
-      console.log('Detekována změna rozvrhu.');
-      await sendDiscord({
-        embeds: [
-          {
-            title: '🔔 Změna v rozvrhu třídy 7B',
-            description: 'Na Bakalářích došlo ke změně rozvrhu.',
-            url: URL,
-            color: 0x3ba55d,
-            fields: [{ name: 'Odkaz na rozvrh', value: URL }],
-            timestamp: now
-          }
-        ]
-      });
-      state.hash = currentHash;
-      state.lastChangedAt = now;
-      stateChanged = true;
-    } else {
-      console.log('Beze změny.');
-    }
-
-    if ((state.failCount || 0) !== 0) {
-      state.failCount = 0;
-      delete state.lastError;
-      stateChanged = true;
-    }
-  } catch (err) {
-    console.error('Chyba při kontrole:', err.message);
-    const prevFail = state.failCount || 0;
-
-    // Počítadlo chyb necháváme narůst jen do MAX_FAILURES, aby se zbytečně
-    // nekomitoval state.json při dlouhodobém výpadku donekonečna.
-    if (prevFail < MAX_FAILURES) {
-      state.failCount = prevFail + 1;
-      state.lastError = err.message;
-      stateChanged = true;
-
-      if (state.failCount === MAX_FAILURES) {
-        await sendDiscord({
-          embeds: [
-            {
-              title: '⚠️ Rozvrh 7B se nepodařilo zkontrolovat',
-              description: err.message.slice(0, 500),
-              color: 0xed4245,
-              url: URL
-            }
-          ]
-        });
-      }
-    }
-  }
-
-  if (stateChanged) {
-    state.lastCheckedAt = now;
-    saveState(state);
-    console.log('Stav uložen.');
-  } else {
-    console.log('Stav se nemění, žádný zápis (šetří commity v repozitáři).');
-  }
-}
-
-main().catch((err) => {
-  console.error('Neočekávaná chyba:', err);
-  process.exit(1);
-});
+main();
