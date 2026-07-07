@@ -146,7 +146,19 @@ async function sendDiscordNotification(changes) {
 
 // ---------- main ----------
 
-async function main() {
+async function main(const lessonsArr = await extractLessons(page);
+
+) {
+  lessonsArr.push({
+  identCode: "TEST123",
+  day: "7/9/2026 (Wednesday)",
+  time: "3 (9:50 AM - 10:35 AM)",
+  subjectAbbrev: "MAT",
+  teacherAbbrev: process.env.TEST_TEACHER || "NK",
+  room: "504",
+  group: "",
+  infoChangeCode: "NoChange",
+});
   const state = loadState();
   const oldLessons = state.lessons || {};
 
