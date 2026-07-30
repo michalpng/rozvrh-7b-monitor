@@ -6,7 +6,7 @@ const axios = require("axios");
 
 const TIMETABLE_URL =
   process.env.TIMETABLE_URL ||
-  "https://ss-stavebnikolin.bakalari.cz/Timetable/Public/Next/Class/7B";
+  "https://ss-stavebnikolin.bakalari.cz/Timetable/Public/Permanent/Class/7P";
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const DISCORD_USER_ID = process.env.DISCORD_USER_ID || null;
 const STATE_PATH = path.join(__dirname, "..", "data", "state.json");
